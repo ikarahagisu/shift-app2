@@ -19,15 +19,12 @@ def generate_template_csv(year, month):
     """選択された年月に合わせたひな形CSVを生成する"""
     num_days = calendar.monthrange(year, month)[1]
     
-    # 基本のカラム
     base_cols = ['医師ID', '氏名', '医師優先度', '月間最小回数', '月間最大回数', '最低空ける日数', 
                  '最大_宿直A', '最大_宿直B', '最大_外来宿直', '最大_日直A', '最大_日直B', '最大_外来日直']
     
-    # 日付のカラム (1〜月末まで)
     day_cols = [str(d) for d in range(1, num_days + 1)]
     cols = base_cols + day_cols
     
-    # サンプルデータ（書き方の例として）
     dummy_data = [
         ['D001', '田中 太郎', 5, 2, 6, 2, 2, 2, 2, 1, 1, 1] + [''] * num_days,
         ['D002', '佐藤 花子', 3, 2, 6, 1, 2, 2, 2, 1, 1, 1] + [''] * num_days,
@@ -36,42 +33,12 @@ def generate_template_csv(year, month):
     
     df_template = pd.DataFrame(dummy_data, columns=cols)
     
-    # 入力例をいくつかセットしておく
     if num_days >= 15:
-        df_template.at[0, '1'] = 'NG'       # 1日はNGの例
-        df_template.at[1, '5'] = '希望3'    # 5日は優先度3の希望の例
-        df_template.at[2, '15'] = '宿直A'   # 15日の宿直Aを確定させる例
+        df_template.at[0, '1'] = 'NG'
+        df_template.at[1, '5'] = '希望3'
+        df_template.at[2, '15'] = '宿直A'
     
     return df_template.to_csv(index=False).encode('utf-8-sig')
-
-def get_calendar_df(year, month):
-    """月曜始まりの週間カレンダーデータフレームを作成する"""
-    # calendar.monthcalendarはデフォルトで月曜始まり(月=0, 日=6)
-    cal = calendar.monthcalendar(year, month)
-    
-    weeks_data = []
-    for week in cal:
-        week_str = []
-        for i, day in enumerate(week):
-            if day == 0:
-                week_str.append("") # 月の範囲外は空欄
-            else:
-                dt = datetime.date(year, month, day)
-                hol_name = jpholiday.is_holiday_name(dt)
-                if hol_name:
-                    week_str.append(f"{day} (祝)")
-                elif i >= 5: # i=5は土曜、i=6は日曜
-                    week_str.append(f"{day} (休)")
-                else:
-                    week_str.append(str(day))
-        weeks_data.append(week_str)
-        
-    columns = ['月', '火', '水', '木', '金', '土', '日']
-    # 行名を「第1週」「第2週」...にする
-    index_names = [f"第{i+1}週" for i in range(len(weeks_data))]
-    
-    df_cal = pd.DataFrame(weeks_data, columns=columns, index=index_names)
-    return df_cal
 
 def parse_single_csv(df, year, month):
     """1つのCSVから、ルール・希望・確定シフトを抽出する"""
@@ -124,27 +91,23 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
             for s in shifts:
                 x[doc_id][d][s] = pulp.LpVariable(f"x_{doc_id}_{d.day}_{s}", cat='Binary')
 
-    # 制約A: 各シフト枠に必ず1人
     for d in dates:
         shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
         for s in shifts:
             prob += pulp.lpSum(x[doc_id][d][s] for _, doc in df_docs.iterrows() for doc_id in [doc['医師ID']]) == 1
 
-    # 制約B: 1日1シフトまで
     for _, doc in df_docs.iterrows():
         doc_id = doc['医師ID']
         for d in dates:
             shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
             prob += pulp.lpSum(x[doc_id][d][s] for s in shifts) <= 1
 
-    # 制約C: 確定済みシフト
     if not df_fixed.empty:
         for _, row in df_fixed.iterrows():
             d = row['日付']
             if d in dates:
                 prob += x[row['医師ID']][d][row['シフト名']] == 1
 
-    # 制約D: 回数と間隔の制限
     for _, doc in df_docs.iterrows():
         doc_id = doc['医師ID']
         total_shifts = pulp.lpSum(x[doc_id][d][s] for d in dates for s in (SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY))
@@ -168,7 +131,6 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
                 )
                 prob += interval_sum <= 1
 
-    # 目的関数
     objective = 0
     if not df_reqs.empty:
         for _, req in df_reqs.iterrows():
@@ -212,19 +174,41 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
 st.title("🏥 シフト自動作成アプリ")
 st.markdown("年月を指定してひな形をダウンロードし、条件を入力してアップロードしてください。")
 
-# --- 年月指定エリア ---
 col1, col2 = st.columns(2)
 with col1:
     year = st.number_input("作成する年", min_value=2026, value=2026)
 with col2:
     month = st.number_input("作成する月", min_value=1, max_value=12, value=4)
 
-# --- カレンダー表示エリア ---
-st.write(f"### 📅 {year}年{month}月のカレンダー")
-st.markdown("※「休」「祝」となっている日は休日用の6枠、空欄の日は平日用の3枠でシフトが組まれます。")
-df_cal = get_calendar_df(year, month)
-# カレンダーを見やすく表示
-st.table(df_cal)
+# --- カレンダー表示エリア（追加いただいたコード） ---
+st.subheader(f"📅 カレンダー確認（{month}月）")
+st.markdown("※ 色付きの日（土・日・祝など）は休日用の6枠、色なしの平日は3枠でシフトが組まれます。")
+
+cal_matrix = calendar.monthcalendar(year, month)
+df_cal = pd.DataFrame(cal_matrix, columns=["月", "火", "水", "木", "金", "土", "日"])
+df_cal = df_cal.astype(str).replace("0", "")
+
+custom_holidays = [] # ※エラー防止のため、一旦空のリストを定義しています
+
+def color_calendar(val):
+    if val == "":
+        return ""
+    d = int(val)
+    date_obj = datetime.date(year, month, d)
+    if date_obj.weekday() == 6 or jpholiday.is_holiday(date_obj) or (d in custom_holidays):
+        return "color: #ff4b4b; font-weight: bold; background-color: #ffeeee;"
+    elif date_obj.weekday() == 5:
+        return "color: #1e90ff; font-weight: bold; background-color: #eef5ff;"
+    return ""
+
+if hasattr(df_cal.style, "map"):
+    styled_cal = df_cal.style.map(color_calendar)
+else:
+    styled_cal = df_cal.style.applymap(color_calendar)
+
+cal_height = len(df_cal) * 35 + 40
+st.dataframe(styled_cal, use_container_width=True, hide_index=True, height=cal_height)
+st.divider()
 
 # --- ひな形ダウンロードエリア ---
 csv_template = generate_template_csv(year, month)
