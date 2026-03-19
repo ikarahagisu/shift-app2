@@ -11,9 +11,9 @@ st.set_page_config(page_title="シフト自動作成アプリ", layout="wide")
 SHIFTS_WEEKDAY = ['宿直A', '宿直B', '外来宿直']
 SHIFTS_HOLIDAY = ['宿直A', '宿直B', '外来宿直', '日直A', '日直B', '外来日直']
 
-def is_holiday(date):
-    """土日・祝日判定"""
-    return date.weekday() >= 5 or jpholiday.is_holiday(date)
+def is_holiday(date, custom_holidays):
+    """土日・祝日・独自休日判定"""
+    return date.weekday() >= 5 or jpholiday.is_holiday(date) or (date.day in custom_holidays)
 
 def generate_template_csv(year, month):
     """選択された年月に合わせたひな形CSVを生成する"""
@@ -75,7 +75,7 @@ def parse_single_csv(df, year, month):
     df_fixed = pd.DataFrame(fixed_data) if fixed_data else pd.DataFrame(columns=['日付', '医師ID', 'シフト名'])
     return df, df_reqs, df_fixed
 
-def solve_shift(year, month, df_docs, df_reqs, df_fixed):
+def solve_shift(year, month, df_docs, df_reqs, df_fixed, custom_holidays):
     num_days = calendar.monthrange(year, month)[1]
     dates = [datetime.date(year, month, d) for d in range(1, num_days + 1)]
     
@@ -87,19 +87,19 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
         x[doc_id] = {}
         for d in dates:
             x[doc_id][d] = {}
-            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
             for s in shifts:
                 x[doc_id][d][s] = pulp.LpVariable(f"x_{doc_id}_{d.day}_{s}", cat='Binary')
 
     for d in dates:
-        shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+        shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
         for s in shifts:
             prob += pulp.lpSum(x[doc_id][d][s] for _, doc in df_docs.iterrows() for doc_id in [doc['医師ID']]) == 1
 
     for _, doc in df_docs.iterrows():
         doc_id = doc['医師ID']
         for d in dates:
-            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
             prob += pulp.lpSum(x[doc_id][d][s] for s in shifts) <= 1
 
     if not df_fixed.empty:
@@ -110,7 +110,7 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
 
     for _, doc in df_docs.iterrows():
         doc_id = doc['医師ID']
-        total_shifts = pulp.lpSum(x[doc_id][d][s] for d in dates for s in (SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY))
+        total_shifts = pulp.lpSum(x[doc_id][d][s] for d in dates for s in (SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY))
         prob += total_shifts >= doc['月間最小回数']
         prob += total_shifts <= doc['月間最大回数']
         
@@ -127,7 +127,7 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
                 interval_sum = pulp.lpSum(
                     x[doc_id][dates[j]][s] 
                     for j in range(i, i + min_interval + 1) 
-                    for s in (SHIFTS_HOLIDAY if is_holiday(dates[j]) else SHIFTS_WEEKDAY)
+                    for s in (SHIFTS_HOLIDAY if is_holiday(dates[j], custom_holidays) else SHIFTS_WEEKDAY)
                 )
                 prob += interval_sum <= 1
 
@@ -141,7 +141,7 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
             doc_priority = df_docs[df_docs['医師ID'] == doc_id]['医師優先度'].values[0]
             
             if d in dates and doc_id in x:
-                shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+                shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
                 day_sum = pulp.lpSum(x[doc_id][d][s] for s in shifts)
                 if req_type == 'NG':
                     prob += day_sum == 0
@@ -154,7 +154,7 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
     if pulp.LpStatus[status] == 'Optimal':
         result_data = []
         for d in dates:
-            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
             row_data = {'日付': d.strftime('%Y/%m/%d'), '曜日': ['月', '火', '水', '木', '金', '土', '日'][d.weekday()]}
             for s in shifts:
                 for doc_id in x:
@@ -180,23 +180,53 @@ with col1:
 with col2:
     month = st.number_input("作成する月", min_value=1, max_value=12, value=4)
 
-# --- カレンダー表示エリア（追加いただいたコード） ---
+# --- 独自休日設定エリア ---
+num_days = calendar.monthrange(year, month)[1]
+all_days = list(range(1, num_days + 1))
+custom_holidays = st.multiselect(
+    f"🎍 {month}月の「独自の休日（年末年始や創立記念日など）」があれば選択してください",
+    options=all_days,
+    format_func=lambda x: f"{month}月{x}日"
+)
+
+# --- カレンダー表示エリア ---
 st.subheader(f"📅 カレンダー確認（{month}月）")
-st.markdown("※ 色付きの日（土・日・祝など）は休日用の6枠、色なしの平日は3枠でシフトが組まれます。")
+st.markdown("※ 色付きの日（土・日・祝・独自休日）は休日用の6枠、色なしの平日は3枠でシフトが組まれます。")
 
 cal_matrix = calendar.monthcalendar(year, month)
-df_cal = pd.DataFrame(cal_matrix, columns=["月", "火", "水", "木", "金", "土", "日"])
-df_cal = df_cal.astype(str).replace("0", "")
+cal_formatted = []
 
-custom_holidays = [] # ※エラー防止のため、一旦空のリストを定義しています
+# カレンダーのマス目に「(休)」や「(祝)」の文字を追加する処理
+for week in cal_matrix:
+    week_str = []
+    for i, d in enumerate(week):
+        if d == 0:
+            week_str.append("")
+        else:
+            date_obj = datetime.date(year, month, d)
+            if jpholiday.is_holiday(date_obj):
+                week_str.append(f"{d} (祝)")
+            elif d in custom_holidays:
+                week_str.append(f"{d} (休)")
+            elif i == 5 or i == 6: # 土日
+                week_str.append(f"{d} (休)")
+            else:
+                week_str.append(str(d))
+    cal_formatted.append(week_str)
+
+df_cal = pd.DataFrame(cal_formatted, columns=["月", "火", "水", "木", "金", "土", "日"])
 
 def color_calendar(val):
     if val == "":
         return ""
-    d = int(val)
+    # "15 (休)" のような文字列から数字だけを取り出す
+    d = int(str(val).split()[0])
     date_obj = datetime.date(year, month, d)
+    
+    # 日曜・祝日・独自休日は赤色
     if date_obj.weekday() == 6 or jpholiday.is_holiday(date_obj) or (d in custom_holidays):
         return "color: #ff4b4b; font-weight: bold; background-color: #ffeeee;"
+    # 土曜は青色
     elif date_obj.weekday() == 5:
         return "color: #1e90ff; font-weight: bold; background-color: #eef5ff;"
     return ""
@@ -234,7 +264,8 @@ if file_all_in_one:
     if st.button("シフトを自動作成する", type="primary"):
         with st.spinner('計算中... (エラーが出た場合はCSVの条件を少し緩めてみてください)'):
             df_docs, df_reqs, df_fixed = parse_single_csv(df_raw, year, month)
-            df_result, success = solve_shift(year, month, df_docs, df_reqs, df_fixed)
+            # ここで custom_holidays を計算に渡す
+            df_result, success = solve_shift(year, month, df_docs, df_reqs, df_fixed, custom_holidays)
             
             if success:
                 st.success("シフトの作成に成功しました！")
