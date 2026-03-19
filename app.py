@@ -19,7 +19,6 @@ def generate_template_csv(year, month):
     """選択された年月に合わせたひな形CSVを生成する"""
     num_days = calendar.monthrange(year, month)[1]
     
-    # 医師IDを削除し、氏名始まりに変更
     base_cols = ['氏名', '医師優先度', '月間最小回数', '月間最大回数', '最低空ける日数', 
                  '最大_宿直A', '最大_宿直B', '最大_外来宿直', '最大_日直A', '最大_日直B', '最大_外来日直']
     
@@ -43,6 +42,18 @@ def generate_template_csv(year, month):
 
 def parse_single_csv(df, year, month):
     """1つのCSVから、ルール・希望・確定シフトを抽出する"""
+    
+    # 【追加：エラー対策】氏名が空の行（Excelの余分な空行）を削除
+    if '氏名' in df.columns:
+        df = df.dropna(subset=['氏名'])
+        
+    # 【追加：エラー対策】数値ルールの空欄(NaN)を自動的に0に変換する
+    numeric_cols = ['医師優先度', '月間最小回数', '月間最大回数', '最低空ける日数', 
+                    '最大_宿直A', '最大_宿直B', '最大_外来宿直', '最大_日直A', '最大_日直B', '最大_外来日直']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
+
     df.columns = df.columns.astype(str)
     num_days = calendar.monthrange(year, month)[1]
     
@@ -50,7 +61,7 @@ def parse_single_csv(df, year, month):
     fixed_data = []
     
     for _, row in df.iterrows():
-        doc_name = row['氏名'] # 医師IDを氏名に変更
+        doc_name = row['氏名']
         for day in range(1, num_days + 1):
             col_name = str(day)
             if col_name in df.columns:
@@ -90,7 +101,6 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed, custom_holidays):
             x[doc_name][d] = {}
             shifts = SHIFTS_HOLIDAY if is_holiday(d, custom_holidays) else SHIFTS_WEEKDAY
             for s in shifts:
-                # 変数名に日本語やスペースが入るとエラーになることがあるため、行番号(idx)を使用
                 x[doc_name][d][s] = pulp.LpVariable(f"x_{idx}_{d.day}_{s}", cat='Binary')
 
     for d in dates:
@@ -261,7 +271,7 @@ with st.expander("💡 ひな形（CSV）の入力ルール・書き方を確認
     **【基本ルールの設定（左側の列）について】**
     * **月間最小/最大回数**: その月に割り当てる合計シフト数の範囲です。
     * **最低空ける日数**: 「1」なら連勤不可、「2」なら中2日必要になります。
-    * **最大_〇〇**: そのシフトに入る最大回数です。
+    * **最大_〇〇**: そのシフトに入る最大回数です。※空欄にした場合は「0回」として扱われます。
     """)
 
 st.divider()
