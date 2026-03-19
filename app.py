@@ -1,133 +1,185 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>シフト希望＆確定入力画面</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator.min.css" rel="stylesheet">
-    <script type="text/javascript" src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
-    <style>
-        body { background-color: #f8f9fa; padding: 20px; }
-        #shift-table { margin-top: 20px; background-color: white; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-        .control-panel { margin-top: 20px; padding: 15px; background-color: white; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-    </style>
-</head>
-<body>
+import streamlit as st
+import pandas as pd
+import pulp
+import calendar
+import datetime
+import jpholiday
 
-    <div class="container-fluid">
-        <h2 class="mb-3">シフト希望・確定入力グリッド (2026年4月)</h2>
-        <p>セルをクリックして、「希望」「NG」または「確定シフト（手動ロック）」を選択できます。<br>右下のボタンを押すと、空いているセルをPythonが自動で埋めます。</p>
+# 【修正ポイント】HTMLタグの代わりに、ここでページの設定を行います。
+# ※ st.set_page_config は必ず他のStreamlitコマンドより先に書く必要があります。
+st.set_page_config(page_title="シフト希望＆確定入力画面", layout="wide")
+
+# --- 定数定義 ---
+SHIFTS_WEEKDAY = ['宿直A', '宿直B', '外来宿直']
+SHIFTS_HOLIDAY = ['宿直A', '宿直B', '外来宿直', '日直A', '日直B', '外来日直']
+
+def is_holiday(date):
+    """土日・祝日判定"""
+    return date.weekday() >= 5 or jpholiday.is_holiday(date)
+
+def solve_shift(year, month, df_docs, df_reqs, df_fixed):
+    # 1. 日付のセットアップ
+    num_days = calendar.monthrange(year, month)[1]
+    dates = [datetime.date(year, month, d) for d in range(1, num_days + 1)]
+    
+    # 2. 最適化問題の定義 (希望を最大化)
+    prob = pulp.LpProblem("DoctorShift", pulp.LpMaximize)
+    
+    # 3. 変数の定義: x[doc_id][date][shift] = 0 or 1 (割り当てる場合1)
+    x = {}
+    for _, doc in df_docs.iterrows():
+        doc_id = doc['医師ID']
+        x[doc_id] = {}
+        for d in dates:
+            x[doc_id][d] = {}
+            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            for s in shifts:
+                x[doc_id][d][s] = pulp.LpVariable(f"x_{doc_id}_{d.day}_{s}", cat='Binary')
+
+    # 4. 制約条件の追加
+    # 制約A: 各シフト枠には必ず1人の医師を割り当てる
+    for d in dates:
+        shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+        for s in shifts:
+            prob += pulp.lpSum(x[doc_id][d][s] for _, doc in df_docs.iterrows() for doc_id in [doc['医師ID']]) == 1
+
+    # 制約B: 1人の医師は1日に最大1シフトのみ
+    for _, doc in df_docs.iterrows():
+        doc_id = doc['医師ID']
+        for d in dates:
+            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            prob += pulp.lpSum(x[doc_id][d][s] for s in shifts) <= 1
+
+    # 制約C: 確定済みシフトの反映（絶対に通す設定）
+    if df_fixed is not None and not df_fixed.empty:
+        for _, row in df_fixed.iterrows():
+            d = row['日付'].date()
+            if d in dates:
+                # 確定しているシフトを「1」に固定
+                prob += x[row['医師ID']][d][row['シフト名']] == 1
+
+    # 制約D: 各種回数・間隔の制限
+    for _, doc in df_docs.iterrows():
+        doc_id = doc['医師ID']
         
-        <div id="shift-table"></div>
+        # 月間の最小・最大回数
+        total_shifts = pulp.lpSum(x[doc_id][d][s] for d in dates for s in (SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY))
+        prob += total_shifts >= doc['月間最小回数']
+        prob += total_shifts <= doc['月間最大回数']
+        
+        # 各シフトの最大回数
+        prob += pulp.lpSum(x[doc_id][d]['宿直A'] for d in dates if '宿直A' in x[doc_id][d]) <= doc['最大_宿直A']
+        prob += pulp.lpSum(x[doc_id][d]['宿直B'] for d in dates if '宿直B' in x[doc_id][d]) <= doc['最大_宿直B']
+        prob += pulp.lpSum(x[doc_id][d]['外来宿直'] for d in dates if '外来宿直' in x[doc_id][d]) <= doc['最大_外来宿直']
+        prob += pulp.lpSum(x[doc_id][d]['日直A'] for d in dates if '日直A' in x[doc_id][d]) <= doc['最大_日直A']
+        prob += pulp.lpSum(x[doc_id][d]['日直B'] for d in dates if '日直B' in x[doc_id][d]) <= doc['最大_日直B']
+        prob += pulp.lpSum(x[doc_id][d]['外来日直'] for d in dates if '外来日直' in x[doc_id][d]) <= doc['最大_外来日直']
 
-        <div class="control-panel d-flex justify-content-end align-items-center">
-            <span class="me-3 text-muted">※1日・2日は平日（3枠）、3日〜5日は休日（6枠）です。</span>
-            <button id="send-data-btn" class="btn btn-primary px-4 py-2 fw-bold">
-                シフト自動作成をスタート (空欄を埋める)
-            </button>
-        </div>
-    </div>
+        # 最低空ける日数 (例: 1なら連勤不可。2なら中2日必要)
+        min_interval = doc['最低空ける日数']
+        if min_interval > 0:
+            for i in range(len(dates) - min_interval):
+                interval_sum = pulp.lpSum(
+                    x[doc_id][dates[j]][s] 
+                    for j in range(i, i + min_interval + 1) 
+                    for s in (SHIFTS_HOLIDAY if is_holiday(dates[j]) else SHIFTS_WEEKDAY)
+                )
+                prob += interval_sum <= 1
 
-    <script>
-        // 1. セルの色分けルール（Formatter）
-        var colorFormatter = function(cell, formatterParams, onRendered) {
-            var value = cell.getValue();
-            var el = cell.getElement();
+    # 5. 目的関数の設定（NG日の除外と希望の反映）
+    objective = 0
+    if df_reqs is not None and not df_reqs.empty:
+        for _, req in df_reqs.iterrows():
+            d = req['日付'].date()
+            doc_id = req['医師ID']
+            req_type = req['種別'] # 'NG' or '希望'
+            priority = req['優先度'] # 1, 2, 3などの数値
             
-            if (value === "NG") {
-                el.style.backgroundColor = "#ffe6e6"; // 薄い赤
-                el.style.color = "#cc0000";
-            } else if (value === "希望") {
-                el.style.backgroundColor = "#e6f2ff"; // 薄い青
-                el.style.color = "#0066cc";
-            } else if (["宿直A", "宿直B", "外来宿直", "日直A", "日直B", "外来日直"].includes(value)) {
-                el.style.backgroundColor = "#fff0b3"; // 薄い黄色（確定シフト）
-                el.style.fontWeight = "bold";
-            } else {
-                el.style.backgroundColor = ""; // 空白はそのまま
-            }
-            return value || "";
-        };
-
-        // 2. 選択肢（リスト）
-        var cellOptions = ["", "希望", "NG", "宿直A", "宿直B", "外来宿直", "日直A", "日直B", "外来日直"];
-
-        // 3. 【重要】ダミーデータを6人に増やす（休日6枠に対応するため）
-        var tableData = [
-            {id: 1, name: "A先生", day1: "", day2: "NG", day3: "希望", day4: "", day5: ""},
-            {id: 2, name: "B先生", day1: "宿直A", day2: "", day3: "", day4: "NG", day5: ""},
-            {id: 3, name: "C先生", day1: "", day2: "希望", day3: "外来日直", day4: "", day5: "宿直B"},
-            {id: 4, name: "D先生", day1: "", day2: "", day3: "", day4: "", day5: ""},
-            {id: 5, name: "E先生", day1: "", day2: "", day3: "", day4: "", day5: ""},
-            {id: 6, name: "F先生", day1: "", day2: "", day3: "", day4: "", day5: ""},
-        ];
-
-        // 4. 共通の列設定（入力をリスト形式にし、色分けを適用）
-        var dayColumnConfig = { editor: "list", editorParams: {values: cellOptions, autocomplete: true}, formatter: colorFormatter, width: 100, align: "center", headerSort: false };
-
-        // 5. Tabulatorの作成
-        var table = new Tabulator("#shift-table", {
-            data: tableData,
-            layout: "fitData",
-            columns: [
-                {title: "医師名", field: "name", frozen: true, width: 120, cssClass: "fw-bold", headerSort: false},
-                {title: "1日(水)", field: "day1", ...dayColumnConfig},
-                {title: "2日(木)", field: "day2", ...dayColumnConfig},
-                {title: "3日(金・祝)", field: "day3", ...dayColumnConfig},
-                {title: "4日(土)", field: "day4", ...dayColumnConfig},
-                {title: "5日(日)", field: "day5", ...dayColumnConfig},
-            ],
-        });
-
-        // 6. 送信ボタンを押した時の処理（Pythonと通信する）
-        document.getElementById("send-data-btn").addEventListener("click", function() {
-            var currentData = table.getData();
+            # 医師の優先度も加味する
+            doc_priority = df_docs[df_docs['医師ID'] == doc_id]['医師優先度'].values[0]
             
-            // ボタンの文字を変えて、処理中であることをアピール
-            var btn = document.getElementById("send-data-btn");
-            btn.innerText = "シフト計算中...";
-            btn.disabled = true;
+            if d in dates and doc_id in x:
+                shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+                day_sum = pulp.lpSum(x[doc_id][d][s] for s in shifts)
+                if req_type == 'NG':
+                    # NG日は絶対にシフトを入れない
+                    prob += day_sum == 0
+                elif req_type == '希望':
+                    # 希望日は目的関数に加算して入りやすくする（優先度掛け算）
+                    objective += day_sum * priority * doc_priority
 
-            // Python（FastAPI）の窓口へデータを送信
-            fetch("http://127.0.0.1:8000/generate_shift", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(currentData)
-            })
-            .then(response => response.json())
-            .then(data => {
-                // Pythonから返事が返ってきた時の処理
+    prob += objective
+
+    # 6. ソルバーの実行
+    status = prob.solve()
+    
+    if pulp.LpStatus[status] == 'Optimal':
+        # 結果のデータフレーム化
+        result_data = []
+        for d in dates:
+            shifts = SHIFTS_HOLIDAY if is_holiday(d) else SHIFTS_WEEKDAY
+            row_data = {'日付': d.strftime('%Y/%m/%d'), '曜日': ['月', '火', '水', '木', '金', '土', '日'][d.weekday()]}
+            for s in shifts:
+                for doc_id in x:
+                    if pulp.value(x[doc_id][d][s]) == 1:
+                        doc_name = df_docs[df_docs['医師ID'] == doc_id]['氏名'].values[0]
+                        row_data[s] = doc_name
+            result_data.append(row_data)
+        
+        # 曜日によってカラムが変わるため、見やすく整理
+        df_result = pd.DataFrame(result_data)
+        cols = ['日付', '曜日'] + SHIFTS_HOLIDAY # 全シフト枠を並べる
+        df_result = df_result.reindex(columns=cols).fillna('')
+        return df_result, True
+    else:
+        return None, False
+
+# --- Streamlit UI構築 ---
+
+st.title("🏥 シフト希望＆確定入力画面")
+st.markdown("設定された条件や事前の確定シフトを元に、最適なシフト表を自動生成します。")
+
+# 4月以降のシフト作成を想定し、デフォルトを2026年4月に設定
+col1, col2 = st.columns(2)
+with col1:
+    year = st.number_input("作成する年", min_value=2026, value=2026)
+with col2:
+    month = st.number_input("作成する月", min_value=1, max_value=12, value=4)
+
+st.sidebar.header("CSVデータアップロード")
+
+file_docs = st.sidebar.file_uploader("1. 医師設定CSV (必須)", type=['csv'])
+file_reqs = st.sidebar.file_uploader("2. 希望・NG日CSV (任意)", type=['csv'])
+file_fixed = st.sidebar.file_uploader("3. 確定済みシフトCSV (任意)", type=['csv'])
+
+if file_docs:
+    # データの読み込み
+    df_docs = pd.read_csv(file_docs)
+    df_reqs = pd.read_csv(file_reqs, parse_dates=['日付']) if file_reqs else pd.DataFrame()
+    df_fixed = pd.read_csv(file_fixed, parse_dates=['日付']) if file_fixed else pd.DataFrame()
+
+    with st.expander("読み込んだ医師設定データを確認"):
+        st.dataframe(df_docs)
+
+    st.write("---")
+    if st.button("シフトを自動作成する", type="primary"):
+        with st.spinner('最適なシフトを計算中... (数秒かかる場合があります)'):
+            df_result, success = solve_shift(year, month, df_docs, df_reqs, df_fixed)
+            
+            if success:
+                st.success("シフトの作成に成功しました！")
+                st.dataframe(df_result, use_container_width=True)
                 
-                // 計算ステータスを確認（Optimalなら大成功）
-                if (data.status === "success" && data.calculated_status === "Optimal") {
-                    // 【ここが最大のポイント！】
-                    // Pythonが空白を埋めた「答え」のデータ（data.calculated_data）を受け取る
-                    var resultData = data.calculated_data;
-                    
-                    // Tabulatorの表を、新しいデータ（答え）で丸ごと更新する
-                    table.setData(resultData);
-                    
-                    alert("シフトの自動生成に成功しました！\n空いているセルをPythonが最適に埋めました。");
-                    console.log("計算結果:", resultData);
-                } else if (data.calculated_status === "Infeasible") {
-                    // 計算不能（パズル失敗）の場合
-                    alert("シフトを自動生成できませんでした（計算不能）。\n条件が厳しすぎるか、人が足りません。NGや確定シフトを減らして試してください。");
-                } else {
-                    alert("Pythonサーバーからの返事：\n" + data.message);
-                }
-            })
-            .catch(error => {
-                alert("エラーが発生しました。Pythonサーバーが起動しているか確認してください。");
-                console.error("Error:", error);
-            })
-            .finally(() => {
-                // ボタンを元の状態に戻す
-                btn.innerText = "シフト自動作成をスタート (空欄を埋める)";
-                btn.disabled = false;
-            });
-        });
-    </script>
-
-</body>
-</html>
+                # CSVダウンロード機能
+                csv = df_result.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="📥 シフト表をCSVでダウンロード",
+                    data=csv,
+                    file_name=f"shift_{year}_{month:02d}.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("エラー：条件を満たすシフトが作成できませんでした。")
+                st.warning("【解決のヒント】\n・誰かの「月間最小回数」が多すぎませんか？\n・NG日が重なりすぎて、割り当てられる医師がいない日はありませんか？\n・「最低空ける日数」の制限が厳しすぎませんか？\n・事前に確定したシフト(3番のCSV)とルールが矛盾していませんか？")
+else:
+    st.info("👈 左側のサイドバーから「医師設定CSV」をアップロードしてスタートしてください。")
