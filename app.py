@@ -5,8 +5,7 @@ import calendar
 import datetime
 import jpholiday
 
-# 【修正ポイント】HTMLタグの代わりに、ここでページの設定を行います。
-# ※ st.set_page_config は必ず他のStreamlitコマンドより先に書く必要があります。
+# ページ設定（必ず最初に書く）
 st.set_page_config(page_title="シフト希望＆確定入力画面", layout="wide")
 
 # --- 定数定義 ---
@@ -139,18 +138,29 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
 st.title("🏥 シフト希望＆確定入力画面")
 st.markdown("設定された条件や事前の確定シフトを元に、最適なシフト表を自動生成します。")
 
-# 4月以降のシフト作成を想定し、デフォルトを2026年4月に設定
+# 年月の選択
 col1, col2 = st.columns(2)
 with col1:
     year = st.number_input("作成する年", min_value=2026, value=2026)
 with col2:
     month = st.number_input("作成する月", min_value=1, max_value=12, value=4)
 
-st.sidebar.header("CSVデータアップロード")
+st.divider() # 区切り線
 
-file_docs = st.sidebar.file_uploader("1. 医師設定CSV (必須)", type=['csv'])
-file_reqs = st.sidebar.file_uploader("2. 希望・NG日CSV (任意)", type=['csv'])
-file_fixed = st.sidebar.file_uploader("3. 確定済みシフトCSV (任意)", type=['csv'])
+# 1画面にファイルアップロードを配置
+st.subheader("📁 CSVデータのアップロード")
+st.markdown("必要なCSVファイルをアップロードしてください。")
+
+# 3つのアップロード欄を横並びに配置
+col_file1, col_file2, col_file3 = st.columns(3)
+with col_file1:
+    file_docs = st.file_uploader("1. 医師設定CSV (必須)", type=['csv'])
+with col_file2:
+    file_reqs = st.file_uploader("2. 希望・NG日CSV (任意)", type=['csv'])
+with col_file3:
+    file_fixed = st.file_uploader("3. 確定済みシフトCSV (任意)", type=['csv'])
+
+st.divider() # 区切り線
 
 if file_docs:
     # データの読み込み
@@ -158,6 +168,7 @@ if file_docs:
     df_reqs = pd.read_csv(file_reqs, parse_dates=['日付']) if file_reqs else pd.DataFrame()
     df_fixed = pd.read_csv(file_fixed, parse_dates=['日付']) if file_fixed else pd.DataFrame()
 
+    # 長い設定データは折りたたんで表示
     with st.expander("読み込んだ医師設定データを確認"):
         st.dataframe(df_docs)
 
@@ -182,4 +193,5 @@ if file_docs:
                 st.error("エラー：条件を満たすシフトが作成できませんでした。")
                 st.warning("【解決のヒント】\n・誰かの「月間最小回数」が多すぎませんか？\n・NG日が重なりすぎて、割り当てられる医師がいない日はありませんか？\n・「最低空ける日数」の制限が厳しすぎませんか？\n・事前に確定したシフト(3番のCSV)とルールが矛盾していませんか？")
 else:
-    st.info("👈 左側のサイドバーから「医師設定CSV」をアップロードしてスタートしてください。")
+    # サイドバーではなく、上部のアップロード欄を促すメッセージに変更
+    st.info("👆 上のアップロード欄から「1. 医師設定CSV」をアップロードしてスタートしてください。")
