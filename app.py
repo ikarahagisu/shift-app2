@@ -45,27 +45,32 @@ def generate_template_csv(year, month):
     return df_template.to_csv(index=False).encode('utf-8-sig')
 
 def get_calendar_df(year, month):
-    """画面表示用のカレンダーデータフレームを作成する"""
-    num_days = calendar.monthrange(year, month)[1]
-    days = [str(d) for d in range(1, num_days + 1)]
-    weekdays = []
-    holiday_info = []
+    """月曜始まりの週間カレンダーデータフレームを作成する"""
+    # calendar.monthcalendarはデフォルトで月曜始まり(月=0, 日=6)
+    cal = calendar.monthcalendar(year, month)
     
-    for d in range(1, num_days + 1):
-        dt = datetime.date(year, month, d)
-        wd = ['月', '火', '水', '木', '金', '土', '日'][dt.weekday()]
-        weekdays.append(wd)
+    weeks_data = []
+    for week in cal:
+        week_str = []
+        for i, day in enumerate(week):
+            if day == 0:
+                week_str.append("") # 月の範囲外は空欄
+            else:
+                dt = datetime.date(year, month, day)
+                hol_name = jpholiday.is_holiday_name(dt)
+                if hol_name:
+                    week_str.append(f"{day} (祝)")
+                elif i >= 5: # i=5は土曜、i=6は日曜
+                    week_str.append(f"{day} (休)")
+                else:
+                    week_str.append(str(day))
+        weeks_data.append(week_str)
         
-        # 祝日・休日判定（休日の場合は「休」や「祝」を表示）
-        hol_name = jpholiday.is_holiday_name(dt)
-        if hol_name:
-            holiday_info.append("祝")
-        elif dt.weekday() >= 5:
-            holiday_info.append("休")
-        else:
-            holiday_info.append("")
-            
-    df_cal = pd.DataFrame([weekdays, holiday_info], columns=days, index=['曜日', '区分'])
+    columns = ['月', '火', '水', '木', '金', '土', '日']
+    # 行名を「第1週」「第2週」...にする
+    index_names = [f"第{i+1}週" for i in range(len(weeks_data))]
+    
+    df_cal = pd.DataFrame(weeks_data, columns=columns, index=index_names)
     return df_cal
 
 def parse_single_csv(df, year, month):
@@ -218,7 +223,8 @@ with col2:
 st.write(f"### 📅 {year}年{month}月のカレンダー")
 st.markdown("※「休」「祝」となっている日は休日用の6枠、空欄の日は平日用の3枠でシフトが組まれます。")
 df_cal = get_calendar_df(year, month)
-st.dataframe(df_cal, use_container_width=True)
+# カレンダーを見やすく表示
+st.table(df_cal)
 
 # --- ひな形ダウンロードエリア ---
 csv_template = generate_template_csv(year, month)
