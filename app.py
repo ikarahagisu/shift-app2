@@ -5,17 +5,72 @@ import calendar
 import datetime
 import jpholiday
 
-st.set_page_config(page_title="シフト希望＆確定入力画面", layout="wide")
+st.set_page_config(page_title="シフト自動作成アプリ", layout="wide")
 
+# --- 定数定義 ---
 SHIFTS_WEEKDAY = ['宿直A', '宿直B', '外来宿直']
 SHIFTS_HOLIDAY = ['宿直A', '宿直B', '外来宿直', '日直A', '日直B', '外来日直']
 
 def is_holiday(date):
+    """土日・祝日判定"""
     return date.weekday() >= 5 or jpholiday.is_holiday(date)
+
+def generate_template_csv(year, month):
+    """選択された年月に合わせたひな形CSVを生成する"""
+    num_days = calendar.monthrange(year, month)[1]
+    
+    # 基本のカラム
+    base_cols = ['医師ID', '氏名', '医師優先度', '月間最小回数', '月間最大回数', '最低空ける日数', 
+                 '最大_宿直A', '最大_宿直B', '最大_外来宿直', '最大_日直A', '最大_日直B', '最大_外来日直']
+    
+    # 日付のカラム (1〜月末まで)
+    day_cols = [str(d) for d in range(1, num_days + 1)]
+    cols = base_cols + day_cols
+    
+    # サンプルデータ（書き方の例として）
+    dummy_data = [
+        ['D001', '田中 太郎', 5, 2, 6, 2, 2, 2, 2, 1, 1, 1] + [''] * num_days,
+        ['D002', '佐藤 花子', 3, 2, 6, 1, 2, 2, 2, 1, 1, 1] + [''] * num_days,
+        ['D003', '鈴木 一郎', 3, 2, 6, 1, 2, 2, 2, 1, 1, 1] + [''] * num_days,
+    ]
+    
+    df_template = pd.DataFrame(dummy_data, columns=cols)
+    
+    # 入力例をいくつかセットしておく
+    if num_days >= 15:
+        df_template.at[0, '1'] = 'NG'       # 1日はNGの例
+        df_template.at[1, '5'] = '希望3'    # 5日は優先度3の希望の例
+        df_template.at[2, '15'] = '宿直A'   # 15日の宿直Aを確定させる例
+    
+    return df_template.to_csv(index=False).encode('utf-8-sig')
+
+def get_calendar_df(year, month):
+    """画面表示用のカレンダーデータフレームを作成する"""
+    num_days = calendar.monthrange(year, month)[1]
+    days = [str(d) for d in range(1, num_days + 1)]
+    weekdays = []
+    holiday_info = []
+    
+    for d in range(1, num_days + 1):
+        dt = datetime.date(year, month, d)
+        wd = ['月', '火', '水', '木', '金', '土', '日'][dt.weekday()]
+        weekdays.append(wd)
+        
+        # 祝日・休日判定（休日の場合は「休」や「祝」を表示）
+        hol_name = jpholiday.is_holiday_name(dt)
+        if hol_name:
+            holiday_info.append("祝")
+        elif dt.weekday() >= 5:
+            holiday_info.append("休")
+        else:
+            holiday_info.append("")
+            
+    df_cal = pd.DataFrame([weekdays, holiday_info], columns=days, index=['曜日', '区分'])
+    return df_cal
 
 def parse_single_csv(df, year, month):
     """1つのCSVから、ルール・希望・確定シフトを抽出する"""
-    df.columns = df.columns.astype(str) # カラム名を文字列に統一
+    df.columns = df.columns.astype(str)
     num_days = calendar.monthrange(year, month)[1]
     
     reqs_data = []
@@ -39,7 +94,7 @@ def parse_single_csv(df, year, month):
                     try:
                         priority = int(val.replace('希望', ''))
                     except ValueError:
-                        pass # 数字がなければ優先度1とする
+                        pass
                     reqs_data.append({'日付': d, '医師ID': doc_id, '種別': '希望', '優先度': priority})
                 elif val in SHIFTS_HOLIDAY + SHIFTS_WEEKDAY:
                     fixed_data.append({'日付': d, '医師ID': doc_id, 'シフト名': val})
@@ -108,7 +163,7 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
                 )
                 prob += interval_sum <= 1
 
-    # 目的関数（希望とNG）
+    # 目的関数
     objective = 0
     if not df_reqs.empty:
         for _, req in df_reqs.iterrows():
@@ -150,17 +205,35 @@ def solve_shift(year, month, df_docs, df_reqs, df_fixed):
 
 # --- Streamlit UI ---
 st.title("🏥 シフト自動作成アプリ")
-st.markdown("1つのCSVファイル（統合版）をアップロードしてシフトを作成します。")
+st.markdown("年月を指定してひな形をダウンロードし、条件を入力してアップロードしてください。")
 
+# --- 年月指定エリア ---
 col1, col2 = st.columns(2)
 with col1:
     year = st.number_input("作成する年", min_value=2026, value=2026)
 with col2:
     month = st.number_input("作成する月", min_value=1, max_value=12, value=4)
 
+# --- カレンダー表示エリア ---
+st.write(f"### 📅 {year}年{month}月のカレンダー")
+st.markdown("※「休」「祝」となっている日は休日用の6枠、空欄の日は平日用の3枠でシフトが組まれます。")
+df_cal = get_calendar_df(year, month)
+st.dataframe(df_cal, use_container_width=True)
+
+# --- ひな形ダウンロードエリア ---
+csv_template = generate_template_csv(year, month)
+st.download_button(
+    label="📝 この月用の入力ひな形（CSV）をダウンロード",
+    data=csv_template,
+    file_name=f"shift_template_{year}_{month:02d}.csv",
+    mime="text/csv",
+)
+
 st.divider()
 
-file_all_in_one = st.file_uploader("📁 シフト設定CSV（ルール・希望・確定 統合版）をアップロード", type=['csv'])
+# --- アップロード＆実行エリア ---
+st.write("### 📁 シフト設定CSVのアップロード")
+file_all_in_one = st.file_uploader("ダウンロードしたひな形に入力し、ここにアップロードしてください", type=['csv'])
 
 if file_all_in_one:
     df_raw = pd.read_csv(file_all_in_one)
@@ -170,9 +243,7 @@ if file_all_in_one:
 
     if st.button("シフトを自動作成する", type="primary"):
         with st.spinner('計算中... (エラーが出た場合はCSVの条件を少し緩めてみてください)'):
-            # 1つのCSVを内部で3つのデータに分解
             df_docs, df_reqs, df_fixed = parse_single_csv(df_raw, year, month)
-            
             df_result, success = solve_shift(year, month, df_docs, df_reqs, df_fixed)
             
             if success:
@@ -181,13 +252,11 @@ if file_all_in_one:
                 
                 csv = df_result.to_csv(index=False).encode('utf-8-sig')
                 st.download_button(
-                    label="📥 シフト表をCSVでダウンロード",
+                    label="📥 完成したシフト表をCSVでダウンロード",
                     data=csv,
-                    file_name=f"shift_{year}_{month:02d}.csv",
+                    file_name=f"shift_result_{year}_{month:02d}.csv",
                     mime="text/csv",
                 )
             else:
                 st.error("エラー：条件が厳しすぎてシフトが組めませんでした。")
-                st.warning("【調整のヒント】\n左側の表の「月間最小回数」を減らすか、右側のカレンダーの「NG」をいくつか消してから、再度アップロードしてお試しください。")
-else:
-    st.info("👆 シフト設定CSVをアップロードしてください。")
+                st.warning("【調整のヒント】\n月間最小回数を減らすか、NG日をいくつか消してから、再度アップロードしてお試しください。")
